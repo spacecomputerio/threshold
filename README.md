@@ -1,2 +1,5 @@
-# threshold
-Threshold crypto for the SpaceComputer
+# Threshold | SpaceComputer 
+
+Threshold crypto for the SpaceComputer ecosystem.
+
+
