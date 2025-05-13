@@ -18,8 +18,7 @@ pub fn encrypt(public_key: &PublicKey, msg: &[u8]) -> CiphertextMsg {
 
 /// Decrypt a message using the secret key.
 pub fn decrypt(secret_key: &SecretKey, ciphertext: &Ciphertext) -> Option<Vec<u8>> {
-    let plaintext = secret_key.decrypt(ciphertext);
-    plaintext
+    secret_key.decrypt(ciphertext)
 }
 
 /// Convert a PublicKey to a hex string
@@ -95,7 +94,10 @@ impl Committee {
     }
 
     /// serialize into { "actors": [actor1, actor2, ...], "pk_set": pk_set }
-    pub fn serialize(&self, actor_pks: Option<BTreeMap<usize, PublicKey>>) -> Result<Vec<u8>, Error> {
+    pub fn serialize(
+        &self,
+        actor_pks: Option<BTreeMap<usize, PublicKey>>,
+    ) -> Result<Vec<u8>, Error> {
         let mut serialized_actors = Vec::new();
         for actor in &self.actors {
             let actor_pk = match &actor_pks {
@@ -120,24 +122,24 @@ impl Committee {
         Ok(bytes)
     }
 
-
-    pub fn deserialize_actor(bytes: Vec<u8>, actor_id: usize, actor_sk: Option<SecretKey>) -> Result<(PublicKeySet, Actor), Error> {
+    pub fn deserialize_actor(
+        bytes: Vec<u8>,
+        actor_id: usize,
+        actor_sk: Option<SecretKey>,
+    ) -> Result<(PublicKeySet, Actor), Error> {
         let s: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             Error::InternalError(format!("Deserialization error (committee): {}", e))
         })?;
         let pk_set_bytes: [u8; 48] = hex::decode(s["pk_set"].as_str().unwrap())
-            .map_err(|e| {
-                Error::InternalError(format!("COuld not find pk_set: {}", e))
-            })?
+            .map_err(|e| Error::InternalError(format!("COuld not find pk_set: {}", e)))?
             .try_into()
             .map_err(|_| {
                 Error::InvalidPublicKey("Invalid length: expected 48 bytes".to_string())
             })?;
-        let pk_set = serde_json::from_slice::<PublicKeySet>(&pk_set_bytes)
-            .map_err(|e| {
-                tracing::error!("Failed to deserialize pk_set: {}", e);
-                Error::InternalError(format!("Deserialization error (pk_set): {}", e))
-            })?;
+        let pk_set = serde_json::from_slice::<PublicKeySet>(&pk_set_bytes).map_err(|e| {
+            tracing::error!("Failed to deserialize pk_set: {}", e);
+            Error::InternalError(format!("Deserialization error (pk_set): {}", e))
+        })?;
 
         let actors = s["actors"]
             .as_array()
@@ -217,7 +219,6 @@ impl Decryptor {
 
         Ok(decrypted)
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -252,9 +253,8 @@ impl Actor {
 
     pub fn serialize(&self, actor_pk: Option<PublicKey>) -> Result<Vec<u8>, Error> {
         let ser_sk = SerdeSecret(self.sk_share.clone());
-        let sk_share_bytes = serde_json::to_vec(&ser_sk).map_err(|e| {
-            Error::InternalError(format!("Serialization error: {}", e))
-        })?;
+        let sk_share_bytes = serde_json::to_vec(&ser_sk)
+            .map_err(|e| Error::InternalError(format!("Serialization error: {}", e)))?;
         let sk_share: String = match actor_pk {
             Some(actor_pk) => CiphertextMsg::new(actor_pk.encrypt(sk_share_bytes))
                 .try_into()
@@ -309,11 +309,10 @@ impl Actor {
             }
             None => {
                 let sk_share_str = s["sk_share"].as_str().unwrap();
-                let sk_share_bytes = hex::decode(sk_share_str).map_err(|e| {
+                hex::decode(sk_share_str).map_err(|e| {
                     tracing::error!("Failed to decode sk_share: {}", e);
                     Error::InternalError(format!("Deserialization error: {}", e))
-                })?;
-                sk_share_bytes
+                })?
             }
         };
         let sk_share: SerdeSecret<SecretKeyShare> = serde_json::from_slice(&sk_share_bytes)
