@@ -4,7 +4,7 @@
 
 This crate includes threshold crypto for the SpaceComputer ecosystem.
 
-I uses [github.com/poanetwork/threshold_crypto](https://github.com/poanetwork/threshold_crypto) as a base implementation and adds some additional functionality for managing keys and threshold committees.
+It uses [github.com/poanetwork/threshold_crypto](https://github.com/poanetwork/threshold_crypto) as a base implementation and adds some additional functionality for managing keys and threshold committees.
 
 ## Usage
 
