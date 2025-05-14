@@ -97,29 +97,23 @@ impl Committee {
     pub fn serialize(
         &self,
         actor_pks: Option<BTreeMap<usize, PublicKey>>,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<serde_json::Value, Error> {
         let mut serialized_actors = Vec::new();
         for actor in &self.actors {
             let actor_pk = match &actor_pks {
                 Some(actor_pks) => actor_pks.get(&actor.id).cloned(),
                 None => None,
             };
-            let serialized = actor.serialize(actor_pk)?;
-            serialized_actors.push(serialized);
+            serialized_actors.push(actor.serialize(actor_pk)?);
         }
         let pk_set_bytes = serde_json::to_vec(&self.pk_set).map_err(|e| {
             tracing::error!("Failed to serialize pk_set: {}", e);
             Error::InternalError(format!("Serialization error: {}", e))
         })?;
-        let serialized_actors = serde_json::json!({
+        Ok(serde_json::json!({
             "actors": serialized_actors,
             "pk_set": hex::encode(pk_set_bytes),
-        });
-        let bytes = serde_json::to_vec(&serialized_actors).map_err(|e| {
-            tracing::error!("Failed to serialize committee: {}", e);
-            Error::InternalError(format!("Serialization error: {}", e))
-        })?;
-        Ok(bytes)
+        }))
     }
 
     pub fn deserialize_actor(
@@ -130,12 +124,12 @@ impl Committee {
         let s: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             Error::InternalError(format!("Deserialization error (committee): {}", e))
         })?;
-        let pk_set_bytes: [u8; 48] = hex::decode(s["pk_set"].as_str().unwrap())
-            .map_err(|e| Error::InternalError(format!("COuld not find pk_set: {}", e)))?
-            .try_into()
-            .map_err(|_| {
-                Error::InvalidPublicKey("Invalid length: expected 48 bytes".to_string())
-            })?;
+        let pk_set_bytes = hex::decode(s["pk_set"].as_str().unwrap())
+            .map_err(|e| Error::InternalError(format!("Could not find pk_set: {}", e)))?;
+        // .try_into()
+        // .map_err(|_| {
+        //     Error::InvalidPublicKey("Invalid pkset length: expected 48 bytes".to_string())
+        // })?;
         let pk_set = serde_json::from_slice::<PublicKeySet>(&pk_set_bytes).map_err(|e| {
             tracing::error!("Failed to deserialize pk_set: {}", e);
             Error::InternalError(format!("Deserialization error (pk_set): {}", e))
@@ -156,11 +150,8 @@ impl Committee {
                 actor_id
             )));
         }
-        let actor_bytes = serde_json::to_vec(&actors[0]).map_err(|e| {
-            tracing::error!("Failed to serialize actor: {}", e);
-            Error::InternalError(format!("Serialization error: {}", e))
-        })?;
-        let actor = Actor::deserialize(actor_bytes, actor_sk)?;
+        let val = actors[0].clone();
+        let actor = Actor::deserialize(val, actor_sk)?;
 
         Ok((pk_set, actor))
     }
@@ -251,7 +242,7 @@ impl Actor {
         Ok(dec_share)
     }
 
-    pub fn serialize(&self, actor_pk: Option<PublicKey>) -> Result<Vec<u8>, Error> {
+    pub fn serialize(&self, actor_pk: Option<PublicKey>) -> Result<serde_json::Value, Error> {
         let ser_sk = SerdeSecret(self.sk_share.clone());
         let sk_share_bytes = serde_json::to_vec(&ser_sk)
             .map_err(|e| Error::InternalError(format!("Serialization error: {}", e)))?;
@@ -264,23 +255,14 @@ impl Actor {
                 })?,
             None => hex::encode(sk_share_bytes),
         };
-        let s = serde_json::json!({
+        Ok(serde_json::json!({
             "id": self.id,
             "pk_share": hex::encode(self.pk_share.to_bytes()),
             "sk_share": sk_share.as_str(),
-        });
-        let bytes = serde_json::to_vec(&s).map_err(|e| {
-            tracing::error!("Failed to serialize actor: {}", e);
-            Error::InternalError(format!("Serialization error: {}", e))
-        })?;
-        Ok(bytes)
+        }))
     }
 
-    pub fn deserialize(bytes: Vec<u8>, actor_sk: Option<SecretKey>) -> Result<Self, Error> {
-        let s: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-            tracing::error!("Failed to deserialize actor: {}", e);
-            Error::InternalError(format!("Deserialization error: {}", e))
-        })?;
+    pub fn deserialize(s: serde_json::Value, actor_sk: Option<SecretKey>) -> Result<Self, Error> {
         let id = s["id"]
             .as_u64()
             .ok_or_else(|| Error::InternalError("Failed to parse id from actor".to_string()))?
@@ -426,5 +408,39 @@ mod tests {
             deserialized_actor.pk_share.to_bytes()
         );
         assert_eq!(actor.sk_share, deserialized_actor.sk_share);
+    }
+
+    #[test]
+    fn test_committee_serialization() {
+        let n = 7;
+        let t = 5;
+        let mut actors_sk = BTreeMap::new();
+        let mut actors_pk = BTreeMap::new();
+        for i in 0..n {
+            let actor_sk = new_private_key();
+            let actor_pk = actor_sk.public_key();
+            actors_sk.insert(i, actor_sk);
+            actors_pk.insert(i, actor_pk);
+        }
+
+        let mut c = Committee::new(n, t);
+        let serialized = c.serialize(Some(actors_pk)).unwrap();
+        let actor_id = 1;
+        let sk = actors_sk.get(&actor_id).unwrap();
+        // deserialize the committee as an actor
+        let deserialized_committee_actor = Committee::deserialize_actor(
+            serde_json::to_vec(&serialized).unwrap(),
+            actor_id,
+            Some(sk.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(c.pk_set, deserialized_committee_actor.0);
+        let actor = c.get_actor(actor_id);
+        assert_eq!(actor.sk_share, deserialized_committee_actor.1.sk_share);
+        assert_eq!(
+            actor.pk_share.to_bytes(),
+            deserialized_committee_actor.1.pk_share.to_bytes()
+        );
+        assert_eq!(actor.id, deserialized_committee_actor.1.id);
     }
 }
