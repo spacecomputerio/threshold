@@ -6,6 +6,10 @@ use threshold_crypto::{
     PublicKey, PublicKeySet, PublicKeyShare, SecretKey, SecretKeyShare, serde_impl::SerdeSecret,
 };
 
+pub fn sk_bytes(sk: &SecretKey) -> Vec<u8> {
+    serde_json::to_vec(&SerdeSecret(sk.clone())).unwrap()
+}
+
 /// Convert a PublicKey to a hex string
 pub fn pubkey_hex(pk: PublicKey) -> String {
     let pk_bytes = pk.to_bytes();
@@ -56,12 +60,16 @@ impl Committee {
     /// serialize into { "actors": [actor1, actor2, ...], "pk_set": pk_set }
     pub fn serialize(
         &self,
-        actor_pks: Option<BTreeMap<usize, PublicKey>>,
+        actor_pks: Option<BTreeMap<usize, crate::core::PubKey>>,
     ) -> Result<serde_json::Value, Error> {
         let mut serialized_actors = Vec::new();
         for actor in &self.actors {
             let actor_pk = match &actor_pks {
-                Some(actor_pks) => actor_pks.get(&actor.id).cloned(),
+                Some(actor_pks) => {
+                    let actor_pk = actor_pks.get(&actor.id).cloned().unwrap();
+                    let pk = actor_pk.get_public_key();
+                    Some(*pk)
+                }
                 None => None,
             };
             serialized_actors.push(actor.serialize(actor_pk)?);
@@ -256,7 +264,7 @@ mod tests {
             let actor_sk = crate::core::new_private_key();
             let actor_pk = actor_sk.public_key();
             actors_sk.insert(i, actor_sk);
-            actors_pk.insert(i, actor_pk);
+            actors_pk.insert(i, crate::core::PubKey::new(actor_pk));
         }
 
         let mut c = Committee::new(n, t);

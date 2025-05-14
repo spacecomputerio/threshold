@@ -22,6 +22,27 @@ pub enum Error {
     #[error("Internal error: {0}")]
     InternalError(String),
 }
+
+/// Wrapper for the public key, which is a serialized version of the public key.
+#[derive(Clone, Debug)]
+pub struct PubKey(pub PublicKey);
+
+impl PubKey {
+    pub fn new(public_key: PublicKey) -> Self {
+        PubKey(public_key)
+    }
+
+    pub fn new_from_bytes(bytes: [u8; 48]) -> Result<Self, Error> {
+        PublicKey::from_bytes(bytes)
+            .map(PubKey)
+            .map_err(|e| Error::InvalidPublicKey(format!("Failed to create public key: {}", e)))
+    }
+
+    pub fn get_public_key(&self) -> &PublicKey {
+        &self.0
+    }
+}
+
 /// Wrapper for the ciphertext message, which is a serialized version of the ciphertext.
 #[derive(Clone)]
 pub struct CiphertextMsg(Ciphertext);
