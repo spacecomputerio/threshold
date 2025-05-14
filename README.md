@@ -12,7 +12,7 @@ It uses [github.com/poanetwork/threshold_crypto](https://github.com/poanetwork/t
 The following crates are included in this repo:
 
 - [threshold](./threshold/README.md): The main crate that includes the core functionality / threshold cryptography implementation.
-- [threshold-cli](./threshold-cli/README.md): A command line interface for the `threshold` crate. This crate is used to generate keys and manage threshold committees.
+- [cli](./cli/README.md): A command line interface for generating keys and managing threshold committees.
 - `threshold-peer` (WIP): A crate that includes the p2p functionality for running a threshold committee.
 
 ## Usage
