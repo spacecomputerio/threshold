@@ -19,6 +19,8 @@ pub enum Error {
     InvalidPrivateKey(String),
     #[error("Invalid cipher text: {0}")]
     InvalidCiphertext(String),
+    #[error("Key not found")]
+    KeyNotFound,
     #[error("Internal error: {0}")]
     InternalError(String),
 }

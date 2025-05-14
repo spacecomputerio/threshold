@@ -6,8 +6,70 @@ use threshold_crypto::{
     PublicKey, PublicKeySet, PublicKeyShare, SecretKey, SecretKeyShare, serde_impl::SerdeSecret,
 };
 
+use serde::{Deserialize, Serialize};
+
+/// ActorInfo struct to hold the actor's information
+/// including id (in the committee), public key (pk), and secret key (sk).
+/// It is used for serialization and deserialization of the actor.
+/// The secret key is optional and is only used by the actor itself (to decrypt the private key share).
+/// The public key is represented as a hex string.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ActorInfo {
+    id: usize,
+    pk: String,
+    sk: Option<String>,
+}
+
+impl ActorInfo {
+    pub fn new(id: usize, pk: String, sk: Option<String>) -> Self {
+        ActorInfo { id, pk, sk }
+    }
+
+    pub fn new_from_sk(id: usize, sk: SecretKey) -> Self {
+        let pk = pubkey_hex(sk.public_key());
+        let sk_bytes = sk_bytes(&sk);
+        ActorInfo {
+            id,
+            pk,
+            sk: Some(hex::encode(sk_bytes)),
+        }
+    }
+
+    pub fn get_id(&self) -> usize {
+        self.id
+    }
+
+    pub fn get_pk(&self) -> &str {
+        &self.pk
+    }
+
+    pub fn get_pk_raw(&self) -> Result<PublicKey, Error> {
+        pubkey_from_hex(&self.pk)
+    }
+
+    pub fn get_sk_raw(&self) -> Result<SecretKey, Error> {
+        if let Some(sk_hex) = &self.sk {
+            let sk_bytes = hex::decode(sk_hex).map_err(|e| {
+                tracing::error!("Failed to decode secret key hex: {}", e);
+                Error::InvalidPrivateKey("Invalid hex string".to_string())
+            })?;
+            sk_from_bytes(&sk_bytes)
+        } else {
+            Err(Error::KeyNotFound)
+        }
+    }
+}
+
 pub fn sk_bytes(sk: &SecretKey) -> Vec<u8> {
     serde_json::to_vec(&SerdeSecret(sk.clone())).unwrap()
+}
+
+pub fn sk_from_bytes(bytes: &[u8]) -> Result<SecretKey, Error> {
+    let sk: SerdeSecret<SecretKey> = serde_json::from_slice(bytes).map_err(|e| {
+        tracing::error!("Failed to deserialize secret key: {}", e);
+        Error::InvalidPrivateKey("Failed to deserialize secret key".to_string())
+    })?;
+    Ok(sk.0)
 }
 
 /// Convert a PublicKey to a hex string

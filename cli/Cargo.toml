@@ -1,5 +1,5 @@
 [package]
-name = "threshold-cli"
+name = "cli"
 version = "0.1.0"
 edition = "2024"
 
@@ -11,3 +11,4 @@ serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 threshold = { path = "../threshold" }
 tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
