@@ -197,18 +197,18 @@ mod tests {
     fn test_decryptor() {
         let n = 7;
         let t = 5;
+        let mut committee = Committee::new(n, t);
+        let decryptor = Decryptor::new(committee.pk_set.clone());
 
-        let mut c = Committee::new(n, t);
-        let d = Decryptor::new(c.pk_set.clone());
-
-        let pk = c.pk_set.public_key();
+        let pk = committee.pk_set.public_key();
         let ciphertext = pk.encrypt(b"test-message");
         for i in 0..t + 1 {
-            let actor = c.get_actor(i);
+            let actor = committee.get_actor(i);
             let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
-            d.add_share(i, dec_share);
+            decryptor.add_share(i, dec_share);
         }
-        let decrypted = d.decrypt(ciphertext).unwrap();
+
+        let decrypted = decryptor.decrypt(ciphertext).unwrap();
         assert_eq!(decrypted, b"test-message")
     }
 
