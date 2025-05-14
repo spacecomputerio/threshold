@@ -10,7 +10,7 @@ It uses [github.com/poanetwork/threshold_crypto](https://github.com/poanetwork/t
 
 See the [docs](https://docs.rs/threshold) for more information on how to use this crate.
 
-## Examples 
+### Examples
 
 A basic committee decryption:
 
