@@ -1,0 +1,29 @@
+name: Build & Test (Core)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "*" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Format
+      working-directory: threshold
+      run: cargo fmt -- --check
+    - name: Clippy
+      working-directory: threshold
+      run: cargo clippy -- -D warnings
+    - name: Build
+      working-directory: threshold
+      run: cargo build --verbose
+    - name: Test
+      working-directory: threshold
+      run: cargo test --verbose

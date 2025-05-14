@@ -1,5 +1,8 @@
 # SpaceComputer | Threshold 
 
+![Build & Test (Core)](https://github.com/spacecomputerio/threshold/actions/workflows/core.yml/badge.svg?branch=main)
+![Build & Test (CLI)](https://github.com/spacecomputerio/threshold/actions/workflows/cli.yml/badge.svg?branch=main)
+
 This repo contains the threshold cryptography implementation for the SpaceComputer ecosystem.
 
 It uses [github.com/poanetwork/threshold_crypto](https://github.com/poanetwork/threshold_crypto) as a base implementation and adds some additional functionality for managing keys and threshold committees.
