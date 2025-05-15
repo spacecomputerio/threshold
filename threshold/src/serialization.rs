@@ -9,44 +9,42 @@ use threshold_crypto::{
 use serde::{Deserialize, Serialize};
 
 /// ActorInfo struct to hold the actor's information
-/// including id (in the committee), public key (pk), and secret key (sk).
-/// It is used for serialization and deserialization of the actor.
+/// including the public key (pk) and secret key (sk) that are used for serialization and deserialization of the actor.
 /// The secret key is optional and is only used by the actor itself (to decrypt the private key share).
 /// The public key is represented as a hex string.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ActorInfo {
-    id: usize,
     pk: String,
     sk: Option<String>,
 }
 
 impl ActorInfo {
-    pub fn new(id: usize, pk: String, sk: Option<String>) -> Self {
-        ActorInfo { id, pk, sk }
+    /// Create a new ActorInfo instance
+    pub fn new(pk: String, sk: Option<String>) -> Self {
+        ActorInfo { pk, sk }
     }
 
-    pub fn new_from_sk(id: usize, sk: SecretKey) -> Self {
+    /// Create a new ActorInfo instance from a SecretKey
+    pub fn new_from_sk(sk: SecretKey) -> Self {
         let pk = pubkey_hex(sk.public_key());
         let sk_bytes = sk_bytes(&sk);
         ActorInfo {
-            id,
             pk,
             sk: Some(hex::encode(sk_bytes)),
         }
     }
 
-    pub fn get_id(&self) -> usize {
-        self.id
-    }
-
+    /// Returns the public key as a hex string
     pub fn get_pk(&self) -> &str {
         &self.pk
     }
 
+    /// Returns the public key
     pub fn get_pk_raw(&self) -> Result<PublicKey, Error> {
         pubkey_from_hex(&self.pk)
     }
 
+    /// Returns the secret key
     pub fn get_sk_raw(&self) -> Result<SecretKey, Error> {
         if let Some(sk_hex) = &self.sk {
             let sk_bytes = hex::decode(sk_hex).map_err(|e| {
@@ -60,10 +58,12 @@ impl ActorInfo {
     }
 }
 
+/// Convert a SecretKey to bytes
 pub fn sk_bytes(sk: &SecretKey) -> Vec<u8> {
     serde_json::to_vec(&SerdeSecret(sk.clone())).unwrap()
 }
 
+/// Convert bytes to a SecretKey
 pub fn sk_from_bytes(bytes: &[u8]) -> Result<SecretKey, Error> {
     let sk: SerdeSecret<SecretKey> = serde_json::from_slice(bytes).map_err(|e| {
         tracing::error!("Failed to deserialize secret key: {}", e);
@@ -119,7 +119,8 @@ impl TryFrom<CiphertextMsg> for String {
 }
 
 impl Committee {
-    /// serialize into { "actors": [actor1, actor2, ...], "pk_set": pk_set }
+    /// Serialize the committee to a JSON value.
+    /// The actor's secret key share is encrypted using the actor's public key.
     pub fn serialize(
         &self,
         actor_pks: Option<BTreeMap<usize, crate::core::PubKey>>,
@@ -146,16 +147,15 @@ impl Committee {
         }))
     }
 
+    /// Deserialize the committee from a JSON value.
     pub fn deserialize(bytes: Vec<u8>) -> Result<Self, Error> {
         let (pk_set, actors_raw) = Self::deserialize_without_actors(bytes)?;
 
         let actors = actors_raw
             .iter()
             .map(|actor| {
-                Actor::deserialize(actor.clone(), None).map_err(|e| {
-                    tracing::error!("Failed to deserialize actor: {}", e);
-                    Error::InternalError(format!("Deserialization error (actor): {}", e))
-                })
+                let (actor, _) = Actor::deserialize(actor.clone(), None)?;
+                Ok(actor)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -186,31 +186,46 @@ impl Committee {
         Ok((pk_set, actors))
     }
 
+    /// Deserialize the committee from a JSON value
     pub fn deserialize_with_actor(
         bytes: Vec<u8>,
-        actor_id: usize,
         actor_sk: Option<SecretKey>,
     ) -> Result<(PublicKeySet, Actor), Error> {
         let (pk_set, actors_raw) = Self::deserialize_without_actors(bytes)?;
+        let actor_pk = actor_sk
+            .as_ref()
+            .map(|sk| sk.public_key())
+            .ok_or_else(|| Error::InternalError("Failed to get actor public key".to_string()))?;
 
         let actors = actors_raw
             .iter()
-            .filter(|actor| actor["id"].as_u64().unwrap() == actor_id as u64)
+            .filter(|actor| {
+                let pk_raw = actor["pk"].as_str();
+                if pk_raw.is_none() {
+                    return false;
+                }
+                match pubkey_from_hex(pk_raw.unwrap()) {
+                    Ok(pk) => pk == actor_pk,
+                    Err(_) => false,
+                }
+            })
             .collect::<Vec<_>>();
         if actors.is_empty() {
             return Err(Error::InternalError(format!(
-                "No actor found with id {}",
-                actor_id
+                "No actor found with pub key {}",
+                pubkey_hex(actor_pk)
             )));
         }
         let val = actors[0].clone();
-        let actor = Actor::deserialize(val, actor_sk)?;
+        let (actor, _) = Actor::deserialize(val, actor_sk)?;
 
         Ok((pk_set, actor))
     }
 }
 
 impl Actor {
+    /// Serialize the actor to a JSON value
+    /// The actor's secret key share is encrypted using the actor's public key
     pub fn serialize(&self, actor_pk: Option<PublicKey>) -> Result<serde_json::Value, Error> {
         let sk_share = match self.sk_share {
             Some(ref sk_share) => sk_share.clone(),
@@ -232,14 +247,27 @@ impl Actor {
                 })?,
             None => hex::encode(sk_share_bytes),
         };
-        Ok(serde_json::json!({
-            "id": self.id,
-            "pk_share": hex::encode(self.pk_share.to_bytes()),
-            "sk_share": sk_share.as_str(),
-        }))
+        match actor_pk {
+            Some(actor_pk) => Ok(serde_json::json!({
+                "id": self.id,
+                "pk_share": hex::encode(self.pk_share.to_bytes()),
+                "sk_share": sk_share.as_str(),
+                "pk": pubkey_hex(actor_pk),
+            })),
+            None => Ok(serde_json::json!({
+                "id": self.id,
+                "pk_share": hex::encode(self.pk_share.to_bytes()),
+                "sk_share": sk_share.as_str(),
+            })),
+        }
     }
 
-    pub fn deserialize(s: serde_json::Value, actor_sk: Option<SecretKey>) -> Result<Self, Error> {
+    /// Deserialize an actor from a JSON value
+    /// The actor's secret key share is decrypted using the actor's secret key
+    pub fn deserialize(
+        s: serde_json::Value,
+        actor_sk: Option<SecretKey>,
+    ) -> Result<(Self, Option<PublicKey>), Error> {
         let id = s["id"]
             .as_u64()
             .ok_or_else(|| Error::InternalError("Failed to parse id from actor".to_string()))?
@@ -278,11 +306,18 @@ impl Actor {
             tracing::error!("Failed to create pk_share from bytes: {}", e);
             Error::InternalError(format!("Deserialization error: {}", e))
         })?;
-        Ok(Actor {
-            id,
-            sk_share,
-            pk_share,
-        })
+        let pk = match s["pk"].as_str() {
+            Some(pk_hex) => Some(pubkey_from_hex(pk_hex)?),
+            None => None,
+        };
+        Ok((
+            Actor {
+                id,
+                sk_share,
+                pk_share,
+            },
+            pk,
+        ))
     }
 }
 
@@ -307,13 +342,15 @@ mod tests {
         let mut c = Committee::new(n, t);
         let actor = c.get_actor(0);
         let serialized = actor.serialize(Some(actor_pk)).unwrap();
-        let deserialized_actor = Actor::deserialize(serialized, Some(actor_sk)).unwrap();
+        let (deserialized_actor, pk) = Actor::deserialize(serialized, Some(actor_sk)).unwrap();
         assert_eq!(actor.id, deserialized_actor.id);
         assert_eq!(
             actor.pk_share.to_bytes(),
             deserialized_actor.pk_share.to_bytes()
         );
         assert_eq!(actor.sk_share, deserialized_actor.sk_share);
+        assert!(pk.is_some());
+        assert_eq!(actor_pk.to_bytes(), pk.unwrap().to_bytes());
     }
 
     #[test]
@@ -340,7 +377,6 @@ mod tests {
         // deserialize the committee as an actor
         let deserialized_committee_actor = Committee::deserialize_with_actor(
             serde_json::to_vec(&serialized).unwrap(),
-            actor_id,
             Some(sk.to_owned()),
         )
         .unwrap();

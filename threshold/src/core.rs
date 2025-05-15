@@ -13,14 +13,19 @@ use thiserror::Error as ThisError;
 /// Error type for the module, using `thiserror` for easy error handling.
 #[derive(ThisError, Debug)]
 pub enum Error {
+    /// Indicates an invalid public key.
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
+    /// Indicates an invalid private key.
     #[error("Invalid private key: {0}")]
     InvalidPrivateKey(String),
+    /// Indicates an invalid ciphertext.
     #[error("Invalid cipher text: {0}")]
     InvalidCiphertext(String),
+    /// Could not find the key in the keyset.
     #[error("Key not found")]
     KeyNotFound,
+    /// General error for internal issues.
     #[error("Internal error: {0}")]
     InternalError(String),
 }
@@ -30,16 +35,19 @@ pub enum Error {
 pub struct PubKey(pub PublicKey);
 
 impl PubKey {
+    /// Creates a new `PubKey` instance from the given public key.
     pub fn new(public_key: PublicKey) -> Self {
         PubKey(public_key)
     }
 
+    /// Creates a new `PubKey` instance from the given byte array.
     pub fn new_from_bytes(bytes: [u8; 48]) -> Result<Self, Error> {
         PublicKey::from_bytes(bytes)
             .map(PubKey)
             .map_err(|e| Error::InvalidPublicKey(format!("Failed to create public key: {}", e)))
     }
 
+    /// Returns the underlying public key.
     pub fn get_public_key(&self) -> &PublicKey {
         &self.0
     }
@@ -50,10 +58,12 @@ impl PubKey {
 pub struct CiphertextMsg(Ciphertext);
 
 impl CiphertextMsg {
+    /// Creates a new `CiphertextMsg` instance from the given ciphertext.
     pub fn new(ciphertext: Ciphertext) -> Self {
         CiphertextMsg(ciphertext)
     }
 
+    /// Returns the underlying ciphertext.
     pub fn get_ciphertext(&self) -> &Ciphertext {
         &self.0
     }
@@ -117,6 +127,7 @@ impl Committee {
 
 /// The `Decryptor` struct is responsible for collecting decryption shares from committee actors
 /// and performing the decryption of the ciphertext once a threshold number of shares have been collected.
+/// The decryptor is exposing an unopinionated API so that it can be used in different contexts and fit multiple use cases.
 #[derive(Debug)]
 pub struct Decryptor {
     dec_shares: Arc<RwLock<BTreeMap<usize, DecryptionShare>>>,
@@ -124,6 +135,7 @@ pub struct Decryptor {
 }
 
 impl Decryptor {
+    /// Creates a new `Decryptor` instance with the given public key set.
     pub fn new(pk_set: PublicKeySet) -> Self {
         Decryptor {
             dec_shares: Arc::new(RwLock::new(BTreeMap::new())),
@@ -131,22 +143,35 @@ impl Decryptor {
         }
     }
 
-    pub fn add_share(&self, id: usize, dec_share: DecryptionShare) {
-        self.dec_shares.write().unwrap().insert(id, dec_share);
+    /// Adds a decryption share to the decryptor.
+    pub fn add_share(&self, id: usize, dec_share: DecryptionShare) -> Result<(), Error> {
+        self.dec_shares
+            .write()
+            .map_err(|_| {
+                Error::InternalError("Failed to add share: could not acquire lock".to_string())
+            })?
+            .insert(id, dec_share);
+        Ok(())
     }
 
-    pub fn has_threshold(&self) -> bool {
-        self._has_threshold(self.number_of_shares())
+    /// Checks if the decryptor has enough shares to perform decryption.
+    pub fn has_threshold(&self) -> Result<bool, Error> {
+        Ok(self._has_threshold(self.number_of_shares()?))
     }
 
-    fn number_of_shares(&self) -> usize {
-        self.dec_shares.read().unwrap().len()
+    fn number_of_shares(&self) -> Result<usize, Error> {
+        let shares = self.dec_shares.read().map_err(|_| {
+            Error::InternalError("Failed to read shares: could not acquire lock".to_string())
+        })?;
+        Ok(shares.len())
     }
 
     fn _has_threshold(&self, n_shares: usize) -> bool {
         n_shares > self.pk_set.threshold()
     }
 
+    /// Decrypts the given ciphertext using the collected decryption shares.
+    /// Returns the decrypted message as a byte vector.
     pub fn decrypt(&self, ciphertext: Ciphertext) -> Result<Vec<u8>, Error> {
         // lock the decryption shares for adding shares
         let mut shares_lock = self.dec_shares.write().unwrap();
@@ -170,6 +195,8 @@ impl Decryptor {
     }
 }
 
+/// The `Actor` struct represents an actor in the committee.
+/// Each actor has a unique ID, a secret key share (optional), and a public key share.
 #[derive(Clone, Debug)]
 pub struct Actor {
     pub id: usize,
@@ -178,6 +205,7 @@ pub struct Actor {
 }
 
 impl Actor {
+    /// Creates a new `Actor` instance with the given ID, secret key share, and public key share.
     pub fn new(id: usize, sk_share: Option<SecretKeyShare>, pk_share: PublicKeyShare) -> Self {
         Actor {
             id,
@@ -186,6 +214,7 @@ impl Actor {
         }
     }
 
+    /// Decrypts a ciphertext using the actor's secret key share.
     pub fn decrypt_share(&self, ciphertext: Ciphertext) -> Result<DecryptionShare, Error> {
         let sk_share = self
             .sk_share
@@ -228,7 +257,7 @@ mod tests {
         for i in 0..t + 1 {
             let actor = committee.get_actor(i);
             let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
-            decryptor.add_share(i, dec_share);
+            decryptor.add_share(i, dec_share).unwrap();
         }
 
         let decrypted = decryptor.decrypt(ciphertext).unwrap();
@@ -248,9 +277,9 @@ mod tests {
         for i in 0..t {
             let actor = c.get_actor(i);
             let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
-            d.add_share(i, dec_share);
+            d.add_share(i, dec_share).unwrap();
         }
-        assert!(!d.has_threshold());
+        assert!(!d.has_threshold().unwrap());
         match d.decrypt(ciphertext.clone()) {
             Err(_) => {}
             Ok(_) => {
@@ -264,9 +293,28 @@ mod tests {
         // add one more share
         let actor = c.get_actor(t);
         let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
-        d.add_share(t, dec_share);
-        assert!(d.has_threshold());
+        d.add_share(t, dec_share).unwrap();
+        assert!(d.has_threshold().unwrap());
         let decrypted = d.decrypt(ciphertext).unwrap();
         assert_eq!(decrypted, b"test-message");
+    }
+
+    #[test]
+    fn test_decryptor_wrong_ciphertext() {
+        let n = 7;
+        let t = 5;
+        let mut committee = Committee::new(n, t);
+        let decryptor = Decryptor::new(committee.pk_set.clone());
+
+        let pk = committee.pk_set.public_key();
+        let ciphertext = pk.encrypt(b"test-message");
+        for i in 0..t + 1 {
+            let actor = committee.get_actor(i);
+            let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
+            decryptor.add_share(i, dec_share).unwrap();
+        }
+
+        let decrypted = decryptor.decrypt(pk.encrypt(b"wrong-message")).unwrap();
+        assert_ne!(decrypted, b"test-message");
     }
 }

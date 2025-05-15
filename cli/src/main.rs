@@ -57,7 +57,7 @@ fn run_cmd(args: Args) {
         Commands::Actor { id, output_file } => {
             tracing::debug!("Generating key for actor {}", id);
             let sk = threshold::core::new_private_key();
-            let actor_info = ActorInfo::new_from_sk(id, sk);
+            let actor_info = ActorInfo::new_from_sk(sk);
             let actor_raw = serde_yaml::to_string(&actor_info).unwrap();
             if let Some(output_file) = output_file {
                 std::fs::write(&output_file, &actor_raw).expect("Failed to write to output file");
@@ -85,11 +85,12 @@ fn run_cmd(args: Args) {
 
             let actor_keys: BTreeMap<usize, PubKey> = actors
                 .iter()
-                .map(|actor| {
+                .enumerate()
+                .map(|(i, actor)| {
                     let apk: [u8; 48] = hex::decode(actor.get_pk()).unwrap().try_into().unwrap();
                     let pk = PubKey::new_from_bytes(apk)
                         .expect("Failed to create public key from bytes");
-                    (actor.get_id(), pk)
+                    (i, pk)
                 })
                 .collect();
 
