@@ -33,5 +33,5 @@ The committee config includes the public keys of all actors in the committee and
 Enables to run an entire flow.
 
 ```bash
-./target/release/cli alls
+./target/release/cli all
 ```
