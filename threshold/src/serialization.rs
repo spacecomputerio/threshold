@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::core::{Actor, CiphertextMsg, Committee, Error};
+use crate::core::{Actor, CiphertextMsg, Committee, DecryptionShareMsg, Error};
 
 use threshold_crypto::{
     PublicKey, PublicKeySet, PublicKeyShare, SecretKey, SecretKeyShare, serde_impl::SerdeSecret,
@@ -115,6 +115,28 @@ impl TryFrom<CiphertextMsg> for String {
         let parsed = serde_json::to_string(value.get_ciphertext())
             .map_err(|e| Error::InvalidCiphertext(format!("Serialization error: {}", e)))?;
         Ok(hex::encode(parsed))
+    }
+}
+
+impl TryFrom<DecryptionShareMsg> for String {
+    type Error = Error;
+
+    fn try_from(value: DecryptionShareMsg) -> Result<Self, Self::Error> {
+        let parsed = serde_json::to_string(value.get_decryption_share())
+            .map_err(|e| Error::InvalidCiphertext(format!("Serialization error: {}", e)))?;
+        Ok(hex::encode(parsed))
+    }
+}
+
+impl TryFrom<String> for DecryptionShareMsg {
+    type Error = Error;
+
+    fn try_from(data: String) -> Result<Self, Self::Error> {
+        let bytes = hex::decode(data)
+            .map_err(|e| Error::InvalidCiphertext(format!("failed to decode hex: {e}")))?;
+        let ciphertext = serde_json::from_slice(bytes.as_slice())
+            .map_err(|e| Error::InvalidCiphertext(format!("failed to deserialize hex: {e}")))?;
+        Ok(DecryptionShareMsg::new(ciphertext))
     }
 }
 
