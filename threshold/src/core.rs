@@ -25,6 +25,13 @@ pub enum Error {
     /// Could not find the key in the keyset.
     #[error("Key not found")]
     KeyNotFound,
+    /// Share already exists for the actor.
+    #[error("Share already exists for actor {0}")]
+    ShareAlreadyExists(usize),
+    /// No quorum of shares available.
+    /// This error is returned when the number of shares is less than the threshold.
+    #[error("No quorum")]
+    NoQuorum,
     /// General error for internal issues.
     #[error("Internal error: {0}")]
     InternalError(String),
@@ -56,6 +63,21 @@ impl PubKey {
 /// Wrapper for the ciphertext message, which is a serialized version of the ciphertext.
 #[derive(Clone)]
 pub struct CiphertextMsg(Ciphertext);
+
+#[derive(Clone)]
+pub struct DecryptionShareMsg(DecryptionShare);
+
+impl DecryptionShareMsg {
+    /// Creates a new `DecryptionShareMsg` instance from the given decryption share.
+    pub fn new(decryption_share: DecryptionShare) -> Self {
+        DecryptionShareMsg(decryption_share)
+    }
+
+    /// Returns the underlying decryption share.
+    pub fn get_decryption_share(&self) -> &DecryptionShare {
+        &self.0
+    }
+}
 
 impl CiphertextMsg {
     /// Creates a new `CiphertextMsg` instance from the given ciphertext.
@@ -125,76 +147,6 @@ impl Committee {
     }
 }
 
-/// The `Decryptor` struct is responsible for collecting decryption shares from committee actors
-/// and performing the decryption of the ciphertext once a threshold number of shares have been collected.
-/// The decryptor is exposing an unopinionated API so that it can be used in different contexts and fit multiple use cases.
-#[derive(Debug)]
-pub struct Decryptor {
-    dec_shares: Arc<RwLock<BTreeMap<usize, DecryptionShare>>>,
-    pk_set: PublicKeySet,
-}
-
-impl Decryptor {
-    /// Creates a new `Decryptor` instance with the given public key set.
-    pub fn new(pk_set: PublicKeySet) -> Self {
-        Decryptor {
-            dec_shares: Arc::new(RwLock::new(BTreeMap::new())),
-            pk_set,
-        }
-    }
-
-    /// Adds a decryption share to the decryptor.
-    pub fn add_share(&self, id: usize, dec_share: DecryptionShare) -> Result<(), Error> {
-        self.dec_shares
-            .write()
-            .map_err(|_| {
-                Error::InternalError("Failed to add share: could not acquire lock".to_string())
-            })?
-            .insert(id, dec_share);
-        Ok(())
-    }
-
-    /// Checks if the decryptor has enough shares to perform decryption.
-    pub fn has_threshold(&self) -> Result<bool, Error> {
-        Ok(self._has_threshold(self.number_of_shares()?))
-    }
-
-    fn number_of_shares(&self) -> Result<usize, Error> {
-        let shares = self.dec_shares.read().map_err(|_| {
-            Error::InternalError("Failed to read shares: could not acquire lock".to_string())
-        })?;
-        Ok(shares.len())
-    }
-
-    fn _has_threshold(&self, n_shares: usize) -> bool {
-        n_shares > self.pk_set.threshold()
-    }
-
-    /// Decrypts the given ciphertext using the collected decryption shares.
-    /// Returns the decrypted message as a byte vector.
-    pub fn decrypt(&self, ciphertext: Ciphertext) -> Result<Vec<u8>, Error> {
-        // lock the decryption shares for adding shares
-        let mut shares_lock = self.dec_shares.write().unwrap();
-        let n_shares = shares_lock.len();
-        if !self._has_threshold(n_shares) {
-            return Err(Error::InternalError(format!(
-                "Not enough decryption shares ({})",
-                n_shares
-            )));
-        }
-        // NOTE: std::mem::take replaces the BTreeMap inside the RwLock with an empty one and returns
-        // the original map. This avoids cloning the data and ensures ownership is transferred
-        let shares: BTreeMap<usize, DecryptionShare> = std::mem::take(&mut *shares_lock);
-
-        let decrypted = self.pk_set.decrypt(&shares, &ciphertext).map_err(|e| {
-            tracing::error!("Failed to decrypt: {}", e);
-            Error::InternalError(format!("Decryption error: {}", e))
-        })?;
-
-        Ok(decrypted)
-    }
-}
-
 /// The `Actor` struct represents an actor in the committee.
 /// Each actor has a unique ID, a secret key share (optional), and a public key share.
 #[derive(Clone, Debug)]
@@ -234,6 +186,188 @@ impl Actor {
     }
 }
 
+/// The `ShareCollector` struct is a thread-safe in-mem store for decryption/signature shares that
+/// were collected from committee actors.
+#[derive(Clone)]
+pub struct ShareCollector<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    shares: Arc<RwLock<BTreeMap<usize, T>>>,
+    threshold: usize,
+}
+
+impl<T> ShareCollector<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Creates a new `ShareCollector` instance with the given public key set.
+    pub fn new(threshold: usize) -> Self {
+        ShareCollector {
+            shares: Arc::new(RwLock::new(BTreeMap::new())),
+            threshold,
+        }
+    }
+
+    /// Adds a share to the collection.
+    pub fn add_share(&self, id: usize, share: T) -> Result<bool, Error> {
+        let mut shares = self.shares.write().map_err(|_| {
+            Error::InternalError("Failed to add share: could not acquire lock".to_string())
+        })?;
+        if shares.contains_key(&id) {
+            return Err(Error::ShareAlreadyExists(id));
+        }
+        shares.insert(id, share);
+        Ok(shares.len() > self.threshold)
+    }
+
+    /// Checks if the collector has a quorum of shares
+    pub fn has_quorum(&self) -> Result<bool, Error> {
+        Ok(self.number_of_shares()? > self.threshold)
+    }
+
+    /// Returns the number of collected shares.
+    pub fn len(&self) -> Result<usize, Error> {
+        self.number_of_shares()
+    }
+
+    /// Checks if the collector is empty.
+    pub fn is_empty(&self) -> Result<bool, Error> {
+        Ok(self.number_of_shares()? == 0)
+    }
+
+    /// Clears all collected shares.
+    pub fn clear(&self) -> Result<(), Error> {
+        let mut shares = self.shares.write().map_err(|_| {
+            Error::InternalError("Failed to clear shares: could not acquire lock".to_string())
+        })?;
+        shares.clear();
+        Ok(())
+    }
+
+    /// Collects all shares and returns them as a BTreeMap.
+    /// This method takes ownership of the shares, so the collector will be empty after this call.
+    pub fn collect(&self) -> Result<BTreeMap<usize, T>, Error> {
+        let mut shares = self.shares.write().map_err(|_| {
+            Error::InternalError("Failed to collect shares: could not acquire lock".to_string())
+        })?;
+        // NOTE: std::mem::take replaces the BTreeMap inside the RwLock with an empty one and returns
+        // the original map. This avoids cloning the data and ensures ownership is transferred
+        let shares: BTreeMap<usize, T> = std::mem::take(&mut *shares);
+        Ok(shares)
+    }
+
+    fn number_of_shares(&self) -> Result<usize, Error> {
+        let shares = self.shares.read().map_err(|_| {
+            Error::InternalError("Failed to read shares: could not acquire lock".to_string())
+        })?;
+        Ok(shares.len())
+    }
+}
+
+/// The `Decryptors` struct is a thread-safe in-memory store for `ShareDecryptor` instances.
+/// It allows for the management of multiple decryptors, each associated with a unique ID.
+#[derive(Clone)]
+pub struct Decryptors {
+    index: Arc<RwLock<BTreeMap<usize, Arc<ShareDecryptor>>>>,
+    pk_set: PublicKeySet,
+}
+
+impl Decryptors {
+    /// Creates a new `Decryptors` instance.
+    pub fn new(pk_set: PublicKeySet) -> Self {
+        Decryptors {
+            index: Arc::new(RwLock::new(BTreeMap::new())),
+            pk_set,
+        }
+    }
+
+    pub fn new_decryptor(&self, id: usize) {
+        let decryptor = ShareDecryptor::new(self.pk_set.clone());
+        let mut index = self.index.write().unwrap();
+        index.insert(id, Arc::new(decryptor.clone()));
+    }
+
+    /// Adds a new `ShareDecryptor` to the collection.
+    pub fn add(&self, id: usize, decryptor: Arc<ShareDecryptor>) {
+        let mut index = self.index.write().unwrap();
+        index.insert(id, decryptor);
+    }
+
+    /// Returns the `ShareDecryptor` for the given ID.
+    pub fn get(&self, id: usize) -> Option<Arc<ShareDecryptor>> {
+        let index = self.index.read().unwrap();
+        index.get(&id).cloned()
+    }
+
+    pub fn remove(&self, id: usize) {
+        let mut index = self.index.write().unwrap();
+        index.remove(&id);
+    }
+
+    pub fn has(&self, id: usize) -> bool {
+        let index = self.index.read().unwrap();
+        index.contains_key(&id)
+    }
+}
+
+/// The `ShareDecryptor` struct is responsible for aggregating decryption shares from committee actors using the `ShareCollector`,
+/// and performing the decryption of the ciphertext once a threshold number of shares have been collected.
+/// The ShareDecryptor is exposing an unopinionated API so that it can be used in different contexts and fit multiple use cases.
+#[derive(Clone)]
+pub struct ShareDecryptor {
+    share_collector: ShareCollector<DecryptionShare>,
+    pk_set: PublicKeySet,
+}
+
+impl ShareDecryptor {
+    /// Creates a new `ShareDecryptor` instance with the given public key set.
+    pub fn new(pk_set: PublicKeySet) -> Self {
+        ShareDecryptor {
+            share_collector: ShareCollector::new(pk_set.threshold()),
+            pk_set,
+        }
+    }
+
+    /// Returns the underlying ShareCollector.
+    pub fn get_collector(&self) -> &ShareCollector<DecryptionShare> {
+        &self.share_collector
+    }
+
+    /// Adds a decryption share to the collector.
+    pub fn add_share(&self, id: usize, share: DecryptionShare) -> Result<bool, Error> {
+        self.share_collector.add_share(id, share)
+    }
+
+    /// Checks if the collector has a quorum of shares.
+    pub fn has_quorum(&self) -> Result<bool, Error> {
+        self.share_collector.has_quorum()
+    }
+
+    /// Decrypts the given ciphertext using the collected decryption shares.
+    /// Returns the decrypted message as a byte vector.
+    pub fn decrypt(&self, ciphertext: Ciphertext) -> Result<Vec<u8>, Error> {
+        if !self.share_collector.has_quorum()? {
+            return Err(Error::NoQuorum);
+        }
+        let shares: BTreeMap<usize, DecryptionShare> = self.share_collector.collect()?;
+
+        decrypt_threshold(&self.pk_set, &shares, &ciphertext)
+    }
+}
+
+/// Decrypts the given ciphertext using the provided public key set and decryption shares.
+/// Returns the decrypted message as a byte vector.
+pub fn decrypt_threshold(
+    pk_set: &PublicKeySet,
+    shares: &BTreeMap<usize, DecryptionShare>,
+    ciphertext: &Ciphertext,
+) -> Result<Vec<u8>, Error> {
+    pk_set
+        .decrypt(shares, ciphertext)
+        .map_err(|e| Error::InternalError(format!("Failed to decrypt: {}", e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +384,7 @@ mod tests {
         let n = 7;
         let t = 5;
         let mut committee = Committee::new(n, t);
-        let decryptor = Decryptor::new(committee.pk_set.clone());
+        let decryptor = ShareDecryptor::new(committee.pk_set.clone());
 
         let pk = committee.pk_set.public_key();
         let ciphertext = pk.encrypt(b"test-message");
@@ -269,18 +403,18 @@ mod tests {
         let n = 7;
         let t = 5;
 
-        let mut c = Committee::new(n, t);
-        let d = Decryptor::new(c.pk_set.clone());
+        let mut committee = Committee::new(n, t);
+        let decryptor = ShareDecryptor::new(committee.pk_set.clone());
 
-        let pk = c.pk_set.public_key();
+        let pk = committee.pk_set.public_key();
         let ciphertext = pk.encrypt(b"test-message");
         for i in 0..t {
-            let actor = c.get_actor(i);
+            let actor = committee.get_actor(i);
             let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
-            d.add_share(i, dec_share).unwrap();
+            decryptor.add_share(i, dec_share).unwrap();
         }
-        assert!(!d.has_threshold().unwrap());
-        match d.decrypt(ciphertext.clone()) {
+        assert!(!decryptor.has_quorum().unwrap());
+        match decryptor.decrypt(ciphertext.clone()) {
             Err(_) => {}
             Ok(_) => {
                 // fail the test
@@ -291,11 +425,11 @@ mod tests {
             }
         }
         // add one more share
-        let actor = c.get_actor(t);
+        let actor = committee.get_actor(t);
         let dec_share = actor.decrypt_share(ciphertext.clone()).unwrap();
-        d.add_share(t, dec_share).unwrap();
-        assert!(d.has_threshold().unwrap());
-        let decrypted = d.decrypt(ciphertext).unwrap();
+        decryptor.add_share(t, dec_share).unwrap();
+        assert!(decryptor.has_quorum().unwrap());
+        let decrypted = decryptor.decrypt(ciphertext).unwrap();
         assert_eq!(decrypted, b"test-message");
     }
 
@@ -304,7 +438,7 @@ mod tests {
         let n = 7;
         let t = 5;
         let mut committee = Committee::new(n, t);
-        let decryptor = Decryptor::new(committee.pk_set.clone());
+        let decryptor = ShareDecryptor::new(committee.pk_set.clone());
 
         let pk = committee.pk_set.public_key();
         let ciphertext = pk.encrypt(b"test-message");
