@@ -265,6 +265,52 @@ where
     }
 }
 
+/// The `Decryptors` struct is a thread-safe in-memory store for `ShareDecryptor` instances.
+/// It allows for the management of multiple decryptors, each associated with a unique ID.
+#[derive(Clone)]
+pub struct Decryptors {
+    index: Arc<RwLock<BTreeMap<usize, Arc<ShareDecryptor>>>>,
+    pk_set: PublicKeySet,
+}
+
+impl Decryptors {
+    /// Creates a new `Decryptors` instance.
+    pub fn new(pk_set: PublicKeySet) -> Self {
+        Decryptors {
+            index: Arc::new(RwLock::new(BTreeMap::new())),
+            pk_set,
+        }
+    }
+
+    pub fn new_decryptor(&self, id: usize) {
+        let decryptor = ShareDecryptor::new(self.pk_set.clone());
+        let mut index = self.index.write().unwrap();
+        index.insert(id, Arc::new(decryptor.clone()));
+    }
+
+    /// Adds a new `ShareDecryptor` to the collection.
+    pub fn add(&self, id: usize, decryptor: Arc<ShareDecryptor>) {
+        let mut index = self.index.write().unwrap();
+        index.insert(id, decryptor);
+    }
+
+    /// Returns the `ShareDecryptor` for the given ID.
+    pub fn get(&self, id: usize) -> Option<Arc<ShareDecryptor>> {
+        let index = self.index.read().unwrap();
+        index.get(&id).cloned()
+    }
+
+    pub fn remove(&self, id: usize) {
+        let mut index = self.index.write().unwrap();
+        index.remove(&id);
+    }
+
+    pub fn has(&self, id: usize) -> bool {
+        let index = self.index.read().unwrap();
+        index.contains_key(&id)
+    }
+}
+
 /// The `ShareDecryptor` struct is responsible for aggregating decryption shares from committee actors using the `ShareCollector`,
 /// and performing the decryption of the ciphertext once a threshold number of shares have been collected.
 /// The ShareDecryptor is exposing an unopinionated API so that it can be used in different contexts and fit multiple use cases.
@@ -283,14 +329,6 @@ impl ShareDecryptor {
         }
     }
 
-    /// Creates a new `ShareDecryptor` instance with the given public key set and an empty decryption shares map.
-    pub fn new_from_pk_set(&self) -> Self {
-        ShareDecryptor {
-            share_collector: ShareCollector::new(self.pk_set.threshold()),
-            pk_set: self.pk_set.clone(),
-        }
-    }
-
     /// Returns the underlying ShareCollector.
     pub fn get_collector(&self) -> &ShareCollector<DecryptionShare> {
         &self.share_collector
@@ -298,7 +336,7 @@ impl ShareDecryptor {
 
     /// Adds a decryption share to the collector.
     pub fn add_share(&self, id: usize, share: DecryptionShare) -> Result<bool, Error> {
-        Ok(self.share_collector.add_share(id, share)?)
+        self.share_collector.add_share(id, share)
     }
 
     /// Checks if the collector has a quorum of shares.
@@ -314,7 +352,7 @@ impl ShareDecryptor {
         }
         let shares: BTreeMap<usize, DecryptionShare> = self.share_collector.collect()?;
 
-        Ok(decrypt_threshold(&self.pk_set, &shares, &ciphertext)?)
+        decrypt_threshold(&self.pk_set, &shares, &ciphertext)
     }
 }
 
@@ -325,9 +363,9 @@ pub fn decrypt_threshold(
     shares: &BTreeMap<usize, DecryptionShare>,
     ciphertext: &Ciphertext,
 ) -> Result<Vec<u8>, Error> {
-    pk_set.decrypt(shares, ciphertext).map_err(|e| {
-        Error::InternalError(format!("Failed to decrypt: {}", e))
-    })
+    pk_set
+        .decrypt(shares, ciphertext)
+        .map_err(|e| Error::InternalError(format!("Failed to decrypt: {}", e)))
 }
 
 #[cfg(test)]

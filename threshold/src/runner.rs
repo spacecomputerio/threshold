@@ -1,99 +1,174 @@
 use std::{collections::BTreeMap, sync::Arc, thread};
 
-use crate::core::{Actor, CiphertextMsg, DecryptionShareMsg, ShareDecryptor};
+use crate::core::{Actor, CiphertextMsg, DecryptionShareMsg, Decryptors, Error};
 
+use threshold_crypto::PublicKeySet;
 use tokio::{
     select,
-    sync::{RwLock, mpsc::{Receiver, Sender}},
+    sync::{
+        broadcast,
+        mpsc::{Receiver, Sender},
+    },
 };
 
-#[derive(Clone)]
 /// ActorEvent is an enum that represents the events that can occur in the actor loop.
+#[derive(Clone)]
 pub enum ActorEvent {
     /// NewCiphertext is sent when a new ciphertext is received from the network.
     /// The ciphertext should be decrypted and the decryption share should be sent to the network.
-    NewCiphertext(usize, CiphertextMsg),
+    NewCiphertext(usize, String),
     /// NewDecryptionShare is sent when a new decryption share is received from the network
     /// or sent to the network.
-    NewDecryptionShare(usize, usize, DecryptionShareMsg),
+    NewDecryptionShare(usize, usize, String),
     /// NewDecryption is sent when a new decryption can be performed, i.e. when a quorum of shares
     /// has been received.
     NewDecryption(usize, Vec<u8>),
 }
 
-pub async fn start_actor_loop(
+/// WorkerTransport is a struct that contains the sink and source channels
+/// for the worker threads and the main thread.
+#[derive(Clone)]
+pub struct WorkerTransport<I, O>
+where
+    I: Send + 'static,
+    O: Send + 'static,
+{
+    sink: broadcast::Sender<(usize, O)>,
+    src: broadcast::Sender<(usize, I)>,
+}
+
+impl<I, O> WorkerTransport<I, O>
+where
+    I: Send + Clone + 'static,
+    O: Send + Clone + 'static,
+{
+    pub fn new(buf_size: usize) -> Self {
+        let (sink, _) = tokio::sync::broadcast::channel(buf_size);
+        let (src, _) = tokio::sync::broadcast::channel(buf_size);
+        Self { sink, src }
+    }
+
+    pub fn send_sink(&self, id: usize, msg: O) -> Result<(), Error> {
+        if let Err(e) = self.sink.send((id, msg)) {
+            return Err(Error::InternalError(format!(
+                "Failed to send message on sink channel: {}",
+                e
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn sink_recv(&self) -> broadcast::Receiver<(usize, O)> {
+        self.sink.subscribe()
+    }
+
+    pub fn send_src(&self, id: usize, msg: I) -> Result<(), Error> {
+        if let Err(e) = self.src.send((id, msg)) {
+            return Err(Error::InternalError(format!(
+                "Failed to send message on src channel: {}",
+                e
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn src_recv(&self) -> broadcast::Receiver<(usize, I)> {
+        self.src.subscribe()
+    }
+}
+
+/// Starts the actor loop on the current thread.
+/// It will spawn new threads to handle decryption and share decryption w/o blocking the main thread.
+pub async fn run_actor(
     actor: Actor,
-    decryptor: ShareDecryptor,
+    pk_set: PublicKeySet,
     mut incoming: Receiver<ActorEvent>,
     outgoing: Sender<ActorEvent>,
 ) {
     tracing::debug!("Starting actor {}", actor.id);
     let self_actor_id = actor.id;
-    let decryptors = Arc::new(RwLock::new(BTreeMap::new()));
+    let decryptors = Arc::new(Decryptors::new(pk_set));
     let mut ciphertexts = BTreeMap::new();
     let mut done = BTreeMap::new();
-    
+
     // start a new thread to handle (share) decrypting ciphertexts as it is a blocking operation
-    let (share_decrypt_sink, mut share_decrypt_rec) = tokio::sync::mpsc::channel(8);
-    let (ciphertext_src, ciphertext_rec) = tokio::sync::mpsc::channel(8);
+    let share_decrypt_worker_transport =
+        WorkerTransport::<CiphertextMsg, DecryptionShareMsg>::new(8);
+    let share_decrypt_worker_transport_cloned = share_decrypt_worker_transport.clone();
     thread::spawn(move || {
-        share_decryption_loop(
-            actor,
-            ciphertext_rec,
-            share_decrypt_sink,
-        );
+        share_decryption_loop(actor, share_decrypt_worker_transport_cloned);
     });
 
     // start a new thread to handle decrypting ciphertexts as it is a blocking operation
-    let (decrypt_sink, mut decrypt_rec) = tokio::sync::mpsc::channel(8);
-    let (full_ciphertext_src, full_ciphertext_rec) = tokio::sync::mpsc::channel(8);
+    let decrypt_worker_transport = WorkerTransport::<CiphertextMsg, Vec<u8>>::new(8);
+    let decrypt_worker_transport_cloned = decrypt_worker_transport.clone();
     let decryptors_cloned = decryptors.clone();
     thread::spawn(move || {
         decryption_loop(
             self_actor_id,
             decryptors_cloned,
-            full_ciphertext_rec,
-            decrypt_sink,
+            decrypt_worker_transport_cloned,
         );
     });
 
+    let mut share_decrypt_rec = share_decrypt_worker_transport.sink_recv();
+    let mut decrypt_rec = decrypt_worker_transport.sink_recv();
     loop {
         select! {
             Some(event) = incoming.recv() => {
                 match event {
-                    ActorEvent::NewCiphertext(id, ciphertext) => {
+                    ActorEvent::NewCiphertext(id, raw_ciphertext) => {
+                        let ciphertext = match CiphertextMsg::try_from(raw_ciphertext) {
+                            Ok(ciphertext) => ciphertext,
+                            Err(e) => {
+                                tracing::warn!("Actor {} failed to parse ciphertext: {}", self_actor_id, e);
+                                continue;
+                            }
+                        };
                         tracing::debug!("Actor {} received ciphertext with id {}", self_actor_id, id);
                         if done.contains_key(&id) {
                             tracing::debug!("Actor {} already decrypted message with id {}", self_actor_id, id);
                             continue;
                         }
-                        let mut decryptors = decryptors.write().await;
-                        if decryptors.contains_key(&id) {
+                        if decryptors.has(id) {
                             tracing::debug!("Actor {} already has decryptor for id {}", self_actor_id, id);
                             continue;
                         }
                         // Store the ciphertext for later use (decryption once we have a quorum)
                         ciphertexts.insert(id, ciphertext.clone());
                         // Create a new decryptor for the ciphertext
-                        decryptors.insert(id, Arc::new(decryptor.new_from_pk_set()));
-                        ciphertext_src.send((id, ciphertext.clone())).await.unwrap();
-                        tracing::debug!("Actor {} sent ciphertext to decryptor for id {}", self_actor_id, id);
+                        decryptors.new_decryptor(id);
+                        if let Err(e) = share_decrypt_worker_transport.send_src(id, ciphertext.clone()) {
+                            tracing::error!("Actor {} failed to send ciphertext on channel: {}", self_actor_id, e);
+                        } else {
+                            tracing::debug!("Actor {} sent ciphertext to decryptor for id {}", self_actor_id, id);
+                        }
                     }
-                    ActorEvent::NewDecryptionShare(id, actor_id, share) => {
+                    ActorEvent::NewDecryptionShare(id, actor_id, raw_share) => {
+                        let share = match DecryptionShareMsg::try_from(raw_share) {
+                            Ok(share) => share,
+                            Err(e) => {
+                                tracing::warn!("Actor {} failed to parse decryption share: {}", self_actor_id, e);
+                                continue;
+                            }
+                        };
                         if done.contains_key(&id) {
                             tracing::debug!("Actor {} already decrypted message with id {}", self_actor_id, id);
                             continue;
                         }
                         tracing::debug!("Actor {} received decryption share from {}", self_actor_id, id);
-                        let mut decryptors = decryptors.write().await;
-                        if let Some(d) = decryptors.get_mut(&id) {
+                        if let Some(d) = decryptors.get(id) {
                             if let Err(e) = d.add_share(actor_id, share.get_decryption_share().clone()) {
                                 tracing::error!("Actor {} failed to add share: {}", self_actor_id, e);
                             }
                             if d.has_quorum().unwrap_or(false) {
                                 tracing::debug!("Actor {} has quorum for decryption {}", self_actor_id, id);
                                 let ciphertext = ciphertexts.get(&id).unwrap();
-                                full_ciphertext_src.send((id, ciphertext.clone())).await.unwrap();
+                                if let Err(e) = decrypt_worker_transport.send_src(id, ciphertext.clone()) {
+                                    tracing::error!("Actor {} failed to send ciphertext on channel: {}", self_actor_id, e);
+                                } else {
+                                    tracing::debug!("Actor {} sent ciphertext to decryptor for id {}", self_actor_id, id);
+                                }
                             }
                         } else {
                             tracing::warn!("Actor {} received decryption share for unknown id {}", self_actor_id, id);
@@ -106,30 +181,39 @@ pub async fn start_actor_loop(
                             continue;
                         }
                         done.insert(id, true);
-                        let mut decryptors = decryptors.write().await;
-                        if let Some(decryptor) = decryptors.get_mut(&id) {
+                        if let Some(decryptor) = decryptors.get(id) {
                             if decryptor.get_collector().clear().is_ok() {
                                 tracing::debug!("Actor {} cleared collector for id {}", self_actor_id, id);
                             }
-                            decryptors.remove(&id);
+                            decryptors.remove(id);
                         }
                     }
                 }
             }
-            Some((id, dec_share)) = share_decrypt_rec.recv() => {
-                let mut decryptors = decryptors.write().await;
-                let decryptor = decryptors.get_mut(&id).unwrap();
+            Ok((id, dec_share)) = share_decrypt_rec.recv() => {
+                let decryptor = match decryptors.get(id) {
+                    Some(decryptor) => decryptor,
+                    None => {
+                        tracing::warn!("Actor {} failed to get decryptor for id {}", self_actor_id, id);
+                        continue;
+                    }
+                };
                 match decryptor.add_share(self_actor_id, dec_share.get_decryption_share().clone()) {
                     Ok(has_quorum) => {
                         tracing::debug!("Actor {} decrypted message with id {}", self_actor_id, id);
-                        let event = ActorEvent::NewDecryptionShare(id, self_actor_id , dec_share);
+                        let raw_dec_share = dec_share.try_into().unwrap();
+                        let event = ActorEvent::NewDecryptionShare(id, self_actor_id , raw_dec_share);
                         if let Err(e) = outgoing.send(event).await {
                             tracing::error!("Actor {} failed to send share decryption: {}", self_actor_id, e);
                         }
                         if has_quorum {
                             tracing::debug!("Actor {} has quorum for decryption {}", self_actor_id, id);
                             let ciphertext = ciphertexts.get(&id).unwrap();
-                            full_ciphertext_src.send((id, ciphertext.clone())).await.unwrap();
+                            if let Err(e) = decrypt_worker_transport.send_src(id, ciphertext.clone()) {
+                                tracing::error!("Actor {} failed to send ciphertext on channel: {}", self_actor_id, e);
+                            } else {
+                                tracing::debug!("Actor {} sent ciphertext to decryptor for id {}", self_actor_id, id);
+                            }
                         }
                     }
                     Err(e) => {
@@ -137,15 +221,14 @@ pub async fn start_actor_loop(
                     }
                 };
             }
-            Some((id, plaintext)) = decrypt_rec.recv() => {
+            Ok((id, plaintext)) = decrypt_rec.recv() => {
                 tracing::debug!("Actor {} fully decrypted message with id {}", self_actor_id, id);
                 let event = ActorEvent::NewDecryption(id, plaintext);
                 if let Err(e) = outgoing.send(event).await {
                     tracing::warn!("Actor {} failed to send decryption: {}", self_actor_id, e);
-                } 
+                }
                 done.insert(id, true);
-                let mut decryptors = decryptors.write().await;
-                let _ = decryptors.remove(&id);
+                decryptors.remove(id);
                 let _ = ciphertexts.remove(&id);
             }
 
@@ -153,23 +236,28 @@ pub async fn start_actor_loop(
     }
 }
 
-fn share_decryption_loop(
+/// Handles share decryption of ciphertexts.
+/// NOTE: this function uses blocking operations and should be run in a separate thread.
+pub fn share_decryption_loop(
     actor: Actor,
-    mut ciphertext_rec: Receiver<(usize, CiphertextMsg)>,
-    decrypt_sink: Sender<(usize, DecryptionShareMsg)>,
+    worker_transport: WorkerTransport<CiphertextMsg, DecryptionShareMsg>,
 ) {
     let actor_id = actor.id;
-    tracing::debug!("Starting decryption thread for actor {}", actor_id);
+    tracing::debug!("Starting share-decryption thread for actor {}", actor_id);
+    let mut ciphertext_rec = worker_transport.src_recv();
     loop {
-        tracing::debug!("Actor {} waiting for ciphertext", actor_id);
         let (id, ciphertext) = match ciphertext_rec.blocking_recv() {
-            Some((id, ciphertext)) => (id, ciphertext),
-            None => {
-                tracing::debug!("Actor {} stopping share decryption thread", actor_id);
+            Ok((id, ciphertext)) => (id, ciphertext),
+            Err(e) => {
+                tracing::debug!("Actor {} stopping share-decryption thread: {}", actor_id, e);
                 return;
             }
         };
-        tracing::debug!("Actor {} received ciphertext {}", actor_id, id);
+        tracing::debug!(
+            "Actor {} received ciphertext ({}) for share decryption",
+            actor_id,
+            id
+        );
         let dec_share = match actor.decrypt_share(ciphertext.get_ciphertext().clone()) {
             Ok(share) => {
                 tracing::debug!("Actor {} decrypted share ({})", actor_id, id);
@@ -180,7 +268,7 @@ fn share_decryption_loop(
                 continue;
             }
         };
-        if let Err(e) = decrypt_sink.blocking_send((id, DecryptionShareMsg::new(dec_share))) {
+        if let Err(e) = worker_transport.send_sink(id, DecryptionShareMsg::new(dec_share)) {
             tracing::warn!(
                 "Actor {} failed to send decryption share on channel: {}",
                 actor_id,
@@ -190,25 +278,26 @@ fn share_decryption_loop(
     }
 }
 
-fn decryption_loop(
+/// Handles decryption of ciphertexts after a quorum of shares has been received.
+/// NOTE: this function uses blocking operations and should be run in a separate thread.
+pub fn decryption_loop(
     actor_id: usize,
-    decryptors: Arc<RwLock<BTreeMap<usize, Arc<ShareDecryptor>>>>,
-    mut ciphertext_rec: Receiver<(usize, CiphertextMsg)>,
-    decrypt_sink: Sender<(usize, Vec<u8>)>,
+    decryptors: Arc<Decryptors>,
+    worker_transport: WorkerTransport<CiphertextMsg, Vec<u8>>,
 ) {
     tracing::debug!("Starting decryption thread for actor {}", actor_id);
+    let mut ciphertext_rec = worker_transport.src_recv();
+
     loop {
-        // tracing::debug!("Actor {} waiting for ciphertext", actor_id);
         let (id, ciphertext) = match ciphertext_rec.blocking_recv() {
-            Some((id, ciphertext)) => (id, ciphertext),
-            None => {
-                tracing::debug!("Actor {} stopping decryption thread", actor_id);
+            Ok((id, ciphertext)) => (id, ciphertext),
+            Err(e) => {
+                tracing::debug!("Actor {} stopping decryption thread: {}", actor_id, e);
                 return;
             }
         };
         tracing::debug!("Actor {} received ciphertext {}", actor_id, id);
-        let decryptors = decryptors.blocking_read();
-        let decryptor = match decryptors.get(&id) {
+        let decryptor = match decryptors.get(id) {
             Some(decryptor) => decryptor,
             None => {
                 tracing::warn!("Actor {} failed to get decryptor for id {}", actor_id, id);
@@ -216,7 +305,11 @@ fn decryption_loop(
             }
         };
         if !decryptor.has_quorum().unwrap_or(false) {
-            tracing::warn!("Actor {} does not have quorum for decryption {}, skipping", actor_id, id);
+            tracing::warn!(
+                "Actor {} does not have quorum for decryption {}, skipping",
+                actor_id,
+                id
+            );
             continue;
         }
         let plaintext = match decryptor.decrypt(ciphertext.get_ciphertext().clone()) {
@@ -229,7 +322,7 @@ fn decryption_loop(
                 continue;
             }
         };
-        if let Err(e) = decrypt_sink.blocking_send((id, plaintext)) {
+        if let Err(e) = worker_transport.send_sink(id, plaintext) {
             tracing::warn!(
                 "Actor {} failed to send decryption share on channel: {}",
                 actor_id,
@@ -237,7 +330,6 @@ fn decryption_loop(
             );
         }
     }
-
 }
 
 #[cfg(test)]
@@ -246,23 +338,22 @@ mod tests {
 
     use super::*;
 
-    use crate::core::{Actor, CiphertextMsg, Committee, ShareDecryptor};
+    use crate::core::{Actor, CiphertextMsg, Committee};
 
     use threshold_crypto::PublicKeySet;
-    
+
     use tokio::sync::mpsc::{Receiver, Sender, channel};
 
     #[tokio::test]
-    async fn test_actor_loop() {
+    async fn test_run_actor() {
         // initialize tracing
         tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(tracing::Level::WARN)
             .with_target(false)
             .without_time()
             .init();
 
         let n_msgs = 10;
-        // let n_threads = 5;
         let n = 5;
         let t = 3;
 
@@ -273,8 +364,7 @@ mod tests {
 
         for i in 0..n {
             let actor = committee.get_actor(i);
-            let (incoming, outgoing_rec) =
-                spawn_actor_loop(actor.clone(), committee.pk_set.clone());
+            let (incoming, outgoing_rec) = spawn_actor(actor.clone(), committee.pk_set.clone());
             incoming_vec.push(incoming);
             outgoing_vec.push(outgoing_rec);
         }
@@ -327,7 +417,7 @@ mod tests {
             let ciphertext = pk.encrypt(plaintext.as_bytes());
             for i in 0..n {
                 let incoming = incoming_vec[i].clone();
-                let ciphertext_msg = CiphertextMsg::new(ciphertext.clone());
+                let ciphertext_msg = CiphertextMsg::new(ciphertext.clone()).try_into().unwrap();
                 tokio::spawn(async move {
                     let _ = incoming
                         .send(ActorEvent::NewCiphertext(im, ciphertext_msg))
@@ -348,7 +438,7 @@ mod tests {
         }
     }
 
-    fn spawn_actor_loop(
+    fn spawn_actor(
         actor: Actor,
         pk_set: PublicKeySet,
     ) -> (Sender<ActorEvent>, Receiver<ActorEvent>) {
@@ -356,8 +446,7 @@ mod tests {
         let (outgoing, outgoing_rec): (Sender<ActorEvent>, Receiver<ActorEvent>) = channel(8);
 
         tokio::spawn(async move {
-            let decryptor = ShareDecryptor::new(pk_set);
-            start_actor_loop(actor, decryptor, incoming_rec, outgoing).await;
+            run_actor(actor, pk_set, incoming_rec, outgoing).await;
         });
 
         (incoming, outgoing_rec)

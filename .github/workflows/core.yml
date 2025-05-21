@@ -29,4 +29,4 @@ jobs:
       run: cargo test --verbose
     - name: Test with tokio
       working-directory: threshold
-      run: cargo test --verbose --features tokio-runtime
+      run: cargo test --verbose --features tokio-rt
