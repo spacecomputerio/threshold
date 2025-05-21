@@ -134,9 +134,9 @@ impl TryFrom<String> for DecryptionShareMsg {
     fn try_from(data: String) -> Result<Self, Self::Error> {
         let bytes = hex::decode(data)
             .map_err(|e| Error::InvalidCiphertext(format!("failed to decode hex: {e}")))?;
-        let ciphertext = serde_json::from_slice(bytes.as_slice())
+        let decryption_share = serde_json::from_slice(bytes.as_slice())
             .map_err(|e| Error::InvalidCiphertext(format!("failed to deserialize hex: {e}")))?;
-        Ok(DecryptionShareMsg::new(ciphertext))
+        Ok(DecryptionShareMsg::new(decryption_share))
     }
 }
 

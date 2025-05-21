@@ -27,13 +27,16 @@ pub enum ActorEvent {
 
 /// WorkerTransport is a struct that contains the sink and source channels
 /// for the worker threads and the main thread.
+/// TODO: use an optimized channel for the sink and source channels.
 #[derive(Clone)]
 pub struct WorkerTransport<I, O>
 where
     I: Send + 'static,
     O: Send + 'static,
 {
+    /// The sink channel for sending messages from the worker thread to the main thread.
     sink: broadcast::Sender<(usize, O)>,
+    /// The source channel for sending messages from the main thread to the worker thread.
     src: broadcast::Sender<(usize, I)>,
 }
 
@@ -42,12 +45,14 @@ where
     I: Send + Clone + 'static,
     O: Send + Clone + 'static,
 {
+    /// Creates a new WorkerTransport with the given buffer size.
     pub fn new(buf_size: usize) -> Self {
         let (sink, _) = tokio::sync::broadcast::channel(buf_size);
         let (src, _) = tokio::sync::broadcast::channel(buf_size);
         Self { sink, src }
     }
 
+    /// Sends a message on the sink channel.
     pub fn send_sink(&self, id: usize, msg: O) -> Result<(), Error> {
         if let Err(e) = self.sink.send((id, msg)) {
             return Err(Error::InternalError(format!(
@@ -58,10 +63,12 @@ where
         Ok(())
     }
 
+    /// Returns a receiver for the sink channel.
     pub fn sink_recv(&self) -> broadcast::Receiver<(usize, O)> {
         self.sink.subscribe()
     }
 
+    /// Sends a message on the source channel.
     pub fn send_src(&self, id: usize, msg: I) -> Result<(), Error> {
         if let Err(e) = self.src.send((id, msg)) {
             return Err(Error::InternalError(format!(
@@ -72,6 +79,7 @@ where
         Ok(())
     }
 
+    /// Returns a receiver for the source channel.
     pub fn src_recv(&self) -> broadcast::Receiver<(usize, I)> {
         self.src.subscribe()
     }
