@@ -27,3 +27,20 @@ for i in 0..t + 1 {
 let decrypted = aggregator.decrypt(ciphertext).unwrap();
 assert_eq!(decrypted, b"test-message")
 ```
+
+With `tokio-rt` feature enabled, you can use the async processing for actors:
+
+```rust
+
+use threshold::runner::{ActorEvent, run_actor};
+
+// ...
+
+let (incoming, incoming_rec): (Sender<ActorEvent>, Receiver<ActorEvent>) = tokio::sync::mpsc::channel(8);
+let (outgoing, outgoing_rec): (Sender<ActorEvent>, Receiver<ActorEvent>) = tokio::sync::mpsc::channel(8);
+
+tokio::spawn(async move {
+    run_actor(actor, pk_set, incoming_rec, outgoing).await;
+});
+```
+

@@ -29,7 +29,7 @@ pub enum ActorEvent {
 /// for the worker threads and the main thread.
 /// TODO: use an optimized channel for the sink and source channels.
 #[derive(Clone)]
-pub struct WorkerTransport<I, O>
+struct WorkerTransport<I, O>
 where
     I: Send + 'static,
     O: Send + 'static,
@@ -350,7 +350,7 @@ mod tests {
 
     use threshold_crypto::PublicKeySet;
 
-    use tokio::sync::mpsc::{Receiver, Sender, channel};
+    use tokio::sync::mpsc::{Receiver, Sender};
 
     #[tokio::test]
     async fn test_run_actor() {
@@ -450,8 +450,8 @@ mod tests {
         actor: Actor,
         pk_set: PublicKeySet,
     ) -> (Sender<ActorEvent>, Receiver<ActorEvent>) {
-        let (incoming, incoming_rec): (Sender<ActorEvent>, Receiver<ActorEvent>) = channel(8);
-        let (outgoing, outgoing_rec): (Sender<ActorEvent>, Receiver<ActorEvent>) = channel(8);
+        let (incoming, incoming_rec) = tokio::sync::mpsc::channel(8);
+        let (outgoing, outgoing_rec) = tokio::sync::mpsc::channel(8);
 
         tokio::spawn(async move {
             run_actor(actor, pk_set, incoming_rec, outgoing).await;
