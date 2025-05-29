@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::core::{Actor, CiphertextMsg, Committee, DecryptionShareMsg, Error};
+use crate::core::{Actor, CiphertextMsg, Committee, DecryptionShareMsg, Error, PublicKeySetMsg};
 
 use threshold_crypto::{
     PublicKey, PublicKeySet, PublicKeyShare, SecretKey, SecretKeyShare, serde_impl::SerdeSecret,
@@ -96,6 +96,28 @@ pub fn pubkey_from_hex(tpk: &str) -> Result<PublicKey, Error> {
     })
 }
 
+impl TryFrom<String> for PublicKeySetMsg {
+    type Error = Error;
+
+    fn try_from(data: String) -> Result<Self, Self::Error> {
+        let bytes = hex::decode(data)
+            .map_err(|e| Error::InvalidPublicKey(format!("failed to decode hex: {e}")))?;
+        let pk_set = serde_json::from_slice(bytes.as_slice())
+            .map_err(|e| Error::InvalidPublicKey(format!("failed to deserialize hex: {e}")))?;
+        Ok(PublicKeySetMsg::new(pk_set))
+    }
+}
+
+impl TryFrom<PublicKeySetMsg> for String {
+    type Error = Error;
+
+    fn try_from(value: PublicKeySetMsg) -> Result<Self, Self::Error> {
+        let parsed = serde_json::to_string(value.get_public_key_set())
+            .map_err(|e| Error::InvalidPublicKey(format!("Serialization error: {}", e)))?;
+        Ok(hex::encode(parsed))
+    }
+}
+
 impl TryFrom<String> for CiphertextMsg {
     type Error = Error;
 
@@ -187,6 +209,7 @@ impl Committee {
     fn deserialize_without_actors(
         bytes: Vec<u8>,
     ) -> Result<(PublicKeySet, Vec<serde_json::Value>), Error> {
+        tracing::debug!("Deserializing committee from {} bytes", bytes.len());
         let s: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             Error::InternalError(format!("Deserialization error (committee): {}", e))
         })?;
