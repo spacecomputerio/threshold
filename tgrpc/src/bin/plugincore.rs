@@ -78,8 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to convert committee configuration to JSON bytes");
     let (pk_set, actor) = Committee::deserialize_with_actor(committee_cfg_parsed, Some(actor_sk))
         .expect("Failed to deserialize committee configuration");
-
-    tracing::info!("Initialized actor {}", actor.id);
+    let pk = pk_set.public_key();
+    
+    tracing::info!("Initialized actor {} for committee with public key {}", actor.id, threshold::serialization::pubkey_hex(pk));
 
     let runner = Arc::new(Runner::new(actor, PublicKeySetMsg::new(pk_set)));
 
