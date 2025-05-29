@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package threshold;
+
+service Threshold {
+    rpc AddCiphertext(CiphertextRequest) returns (CiphertextResponse); 
+    rpc AddDecryptionShare(DecryptionShareRequest) returns (DecryptionShareResponse);
+}
+
+message CiphertextRequest {
+    uint32 seq = 1;
+    string value = 2;
+}
+
+message CiphertextResponse {
+    uint32 seq = 1;
+    string decription_share = 2;
+    uint32 actor_id = 3;
+    optional bytes decryption = 4;
+}
+
+message DecryptionShareRequest {
+    uint32 seq = 1;
+    uint32 actor_id = 2; 
+    string value = 3;
+}
+
+message DecryptionShareResponse {
+    uint32 seq = 1;
+    optional bytes decryption = 2;
+}
