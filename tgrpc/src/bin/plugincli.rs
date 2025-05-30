@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
-use threshold::core::CiphertextMsg;
+use tgrpc::proto::threshold::CiphertextRequest;
 use tgrpc::proto::threshold::threshold_client::ThresholdClient;
-use tgrpc::proto::threshold::{CiphertextRequest};
+use threshold::core::CiphertextMsg;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version = "v0.0.1", about = "cli for managing actors and commitees", long_about = None)]
@@ -49,11 +49,21 @@ async fn run_cmd(args: Args) {
                 .expect("Failed to parse public key from hex");
             let ciphertext = pk.encrypt(message.as_bytes());
             let ciphertext = CiphertextMsg::new(ciphertext);
-            println!("{}", String::try_from(ciphertext)
-                .expect("Failed to convert ciphertext to string"));
+            println!(
+                "{}",
+                String::try_from(ciphertext).expect("Failed to convert ciphertext to string")
+            );
         }
-        Commands::Decrypt { ciphertext, seq, grpc_addr } => {
-            tracing::debug!("Decrypting ciphertext '{}' using gRPC at '{}'", ciphertext, grpc_addr);
+        Commands::Decrypt {
+            ciphertext,
+            seq,
+            grpc_addr,
+        } => {
+            tracing::debug!(
+                "Decrypting ciphertext '{}' using gRPC at '{}'",
+                ciphertext,
+                grpc_addr
+            );
             let ciphertext: CiphertextMsg = ciphertext
                 .try_into()
                 .expect("Failed to convert string to CiphertextMsg");
@@ -61,15 +71,20 @@ async fn run_cmd(args: Args) {
             let res = client
                 .add_ciphertext(CiphertextRequest {
                     seq: seq as u32,
-                    value: ciphertext.try_into()
+                    value: ciphertext
+                        .try_into()
                         .expect("Failed to convert CiphertextMsg to string"),
-                }).await
+                })
+                .await
                 .expect("Failed to send ciphertext");
 
             let res = res.into_inner();
             tracing::debug!("Received response: {:?}", res);
             if let Some(decryption) = res.decryption {
-                println!("Decrypted message: {}", String::from_utf8(decryption).expect("Failed to convert bytes to string"));
+                println!(
+                    "Decrypted message: {}",
+                    String::from_utf8(decryption).expect("Failed to convert bytes to string")
+                );
             } else {
                 println!("No decryption available yet.");
             }

@@ -45,7 +45,7 @@ impl Threshold for ThresholdService {
         let reply = CiphertextResponse {
             actor_id: self.runner.get_actor().id as u32,
             seq, // Echo back the sequence number
-            decription_share: dec_share.try_into().map_err(|e| {
+            decryption_share: dec_share.try_into().map_err(|e| {
                 Status::internal(format!("Error converting decryption share: {}", e))
             })?,
             decryption,
@@ -135,7 +135,7 @@ mod tests {
             let dec_share_req = DecryptionShareRequest {
                 seq: res.seq,
                 actor_id: actor.id as u32,
-                value: res.decription_share,
+                value: res.decryption_share,
             };
             let add_share_res = service
                 .add_decryption_share(Request::new(dec_share_req))

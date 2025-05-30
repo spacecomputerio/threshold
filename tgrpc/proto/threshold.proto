@@ -14,7 +14,7 @@ message CiphertextRequest {
 
 message CiphertextResponse {
     uint32 seq = 1;
-    string decription_share = 2;
+    string decryption_share = 2;
     uint32 actor_id = 3;
     optional bytes decryption = 4;
 }

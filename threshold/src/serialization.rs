@@ -102,8 +102,9 @@ impl TryFrom<String> for PublicKeySetMsg {
     fn try_from(data: String) -> Result<Self, Self::Error> {
         let bytes = hex::decode(data)
             .map_err(|e| Error::InvalidPublicKey(format!("failed to decode hex: {e}")))?;
-        let pk_set = serde_json::from_slice(bytes.as_slice())
-            .map_err(|e| Error::InvalidPublicKey(format!("failed to deserialize hex: {e}")))?;
+        let pk_set = serde_json::from_slice(bytes.as_slice()).map_err(|e| {
+            Error::InvalidPublicKey(format!("failed to deserialize PublicKeySet from JSON: {e}"))
+        })?;
         Ok(PublicKeySetMsg::new(pk_set))
     }
 }

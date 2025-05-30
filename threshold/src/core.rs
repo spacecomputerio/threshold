@@ -310,22 +310,21 @@ impl Decryptors {
         index.get(&id).cloned()
     }
 
-    /// Prune the decryptors up to the given sequence number.
-    pub fn prune(&self, seq: usize) -> Result<(), Error> {
+    /// Prune the decryptors up to the given id.
+    pub fn prune(&self, id: usize) -> Result<(), Error> {
         let mut index = self.index.write().map_err(|_| {
             Error::InternalError("Failed to prune decryptors: could not acquire lock".to_string())
         })?;
-        index.retain(|&k, _| k > seq);
+        index.retain(|&k, _| k > id);
         Ok(())
     }
 
+    /// Removes the `ShareDecryptor` with the given ID from the collection.
     pub fn remove(&self, id: usize) -> Result<(), Error> {
         let mut index = self.index.write().map_err(|_| {
             Error::InternalError("Failed to remove decryptor: could not acquire lock".to_string())
         })?;
-        if index.remove(&id).is_none() {
-            return Err(Error::KeyNotFound);
-        }
+        let _ = index.remove(&id);
         Ok(())
     }
 
