@@ -25,9 +25,6 @@ pub enum Error {
     /// Could not find the key in the keyset.
     #[error("Key not found")]
     KeyNotFound,
-    /// Share already exists for the actor.
-    #[error("Share already exists for actor {0}")]
-    ShareAlreadyExists(usize),
     /// No quorum of shares available.
     /// This error is returned when the number of shares is less than the threshold.
     #[error("No quorum")]
@@ -37,9 +34,24 @@ pub enum Error {
     InternalError(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct PublicKeySetMsg(PublicKeySet);
+
+impl PublicKeySetMsg {
+    /// Creates a new `PublicKeySetMsg` instance from the given public key set.
+    pub fn new(public_key_set: PublicKeySet) -> Self {
+        PublicKeySetMsg(public_key_set)
+    }
+
+    /// Returns the underlying public key set.
+    pub fn get_public_key_set(&self) -> &PublicKeySet {
+        &self.0
+    }
+}
+
 /// Wrapper for the public key, which is a serialized version of the public key.
 #[derive(Clone, Debug)]
-pub struct PubKey(pub PublicKey);
+pub struct PubKey(PublicKey);
 
 impl PubKey {
     /// Creates a new `PubKey` instance from the given public key.
@@ -60,10 +72,6 @@ impl PubKey {
     }
 }
 
-/// Wrapper for the ciphertext message, which is a serialized version of the ciphertext.
-#[derive(Clone)]
-pub struct CiphertextMsg(Ciphertext);
-
 #[derive(Clone)]
 pub struct DecryptionShareMsg(DecryptionShare);
 
@@ -78,6 +86,10 @@ impl DecryptionShareMsg {
         &self.0
     }
 }
+
+/// Wrapper for the ciphertext message, which is a serialized version of the ciphertext.
+#[derive(Clone)]
+pub struct CiphertextMsg(Ciphertext);
 
 impl CiphertextMsg {
     /// Creates a new `CiphertextMsg` instance from the given ciphertext.
@@ -210,14 +222,12 @@ where
     }
 
     /// Adds a share to the collection.
+    /// Returns `Ok(true)` if the number of shares exceeds the threshold, otherwise `Ok(false)`.
     pub fn add_share(&self, id: usize, share: T) -> Result<bool, Error> {
         let mut shares = self.shares.write().map_err(|_| {
             Error::InternalError("Failed to add share: could not acquire lock".to_string())
         })?;
-        if shares.contains_key(&id) {
-            return Err(Error::ShareAlreadyExists(id));
-        }
-        shares.insert(id, share);
+        shares.entry(id).or_insert(share);
         Ok(shares.len() > self.threshold)
     }
 
@@ -282,10 +292,10 @@ impl Decryptors {
         }
     }
 
-    pub fn new_decryptor(&self, id: usize) {
-        let decryptor = ShareDecryptor::new(self.pk_set.clone());
-        let mut index = self.index.write().unwrap();
-        index.insert(id, Arc::new(decryptor.clone()));
+    pub fn new_decryptor(&self, id: usize) -> Arc<ShareDecryptor> {
+        let decryptor = Arc::new(ShareDecryptor::new(self.pk_set.clone()));
+        self.add(id, decryptor.clone());
+        decryptor.clone()
     }
 
     /// Adds a new `ShareDecryptor` to the collection.
@@ -300,14 +310,31 @@ impl Decryptors {
         index.get(&id).cloned()
     }
 
-    pub fn remove(&self, id: usize) {
-        let mut index = self.index.write().unwrap();
-        index.remove(&id);
+    /// Prune the decryptors up to the given id.
+    pub fn prune(&self, id: usize) -> Result<(), Error> {
+        let mut index = self.index.write().map_err(|_| {
+            Error::InternalError("Failed to prune decryptors: could not acquire lock".to_string())
+        })?;
+        index.retain(|&k, _| k > id);
+        Ok(())
     }
 
+    /// Removes the `ShareDecryptor` with the given ID from the collection.
+    pub fn remove(&self, id: usize) -> Result<(), Error> {
+        let mut index = self.index.write().map_err(|_| {
+            Error::InternalError("Failed to remove decryptor: could not acquire lock".to_string())
+        })?;
+        let _ = index.remove(&id);
+        Ok(())
+    }
+
+    /// Checks if the decryptor with the given sequence number exists.
+    /// If we fail to acquire the lock, we return false.
     pub fn has(&self, id: usize) -> bool {
-        let index = self.index.read().unwrap();
-        index.contains_key(&id)
+        if let Ok(index) = self.index.read() {
+            return index.contains_key(&id);
+        }
+        false
     }
 }
 
