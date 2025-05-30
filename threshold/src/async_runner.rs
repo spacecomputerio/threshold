@@ -29,7 +29,7 @@ pub enum ActorEvent {
 /// for the worker threads and the main thread.
 /// TODO: use an optimized channel for the sink and source channels.
 #[derive(Clone)]
-struct WorkerTransport<I, O>
+pub struct WorkerTransport<I, O>
 where
     I: Send + 'static,
     O: Send + 'static,
@@ -193,7 +193,7 @@ pub async fn run_actor(
                             if decryptor.get_collector().clear().is_ok() {
                                 tracing::debug!("Actor {} cleared collector for id {}", self_actor_id, id);
                             }
-                            decryptors.remove(id);
+                            let _ = decryptors.remove(id);
                         }
                     }
                 }
@@ -236,7 +236,7 @@ pub async fn run_actor(
                     tracing::warn!("Actor {} failed to send decryption: {}", self_actor_id, e);
                 }
                 done.insert(id, true);
-                decryptors.remove(id);
+                let _ = decryptors.remove(id);
                 let _ = ciphertexts.remove(&id);
             }
 

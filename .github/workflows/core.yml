@@ -21,6 +21,9 @@ jobs:
     - name: Clippy
       working-directory: threshold
       run: cargo clippy -- -D warnings
+    - name: Clippy with tokio
+      working-directory: threshold
+      run: cargo clippy -- -D warnings --features tokio-rt
     - name: Build
       working-directory: threshold
       run: cargo build --verbose

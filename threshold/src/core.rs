@@ -319,6 +319,16 @@ impl Decryptors {
         Ok(())
     }
 
+    pub fn remove(&self, id: usize) -> Result<(), Error> {
+        let mut index = self.index.write().map_err(|_| {
+            Error::InternalError("Failed to remove decryptor: could not acquire lock".to_string())
+        })?;
+        if index.remove(&id).is_none() {
+            return Err(Error::KeyNotFound);
+        }
+        Ok(())
+    }
+
     /// Checks if the decryptor with the given sequence number exists.
     pub fn has(&self, id: usize) -> bool {
         let index = self.index.read().unwrap();
