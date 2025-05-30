@@ -329,9 +329,12 @@ impl Decryptors {
     }
 
     /// Checks if the decryptor with the given sequence number exists.
+    /// If we fail to acquire the lock, we return false.
     pub fn has(&self, id: usize) -> bool {
-        let index = self.index.read().unwrap();
-        index.contains_key(&id)
+        if let Ok(index) = self.index.read() {
+            return index.contains_key(&id);
+        }
+        false
     }
 }
 
